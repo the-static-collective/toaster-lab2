@@ -1,20 +1,16 @@
 /**
- * Toaster Lab - Server-Side Gemini API Proposer Service
- * Uses @google/genai SDK to analyze inputs and emit creative proposal material.
- *
- * IMPORTANT: Gemini output is never canonical execution state. Haunted Toaster
- * alone validates, addresses, resolves, and confers executable meaning.
+ * Toaster Lab - Server-Side Gemini proposal service.
+ * Gemini authors one non-canonical proposal. Haunted Toaster remains the only
+ * canonical execution authority.
  */
 
 import { GoogleGenAI, Type } from "@google/genai";
 import {
   AnalysisMode,
-  Evidence,
   GarmentConstraint,
   GenerationPlan,
   LockState,
   PlanProposal,
-  RationaleItem,
 } from "../types/toaster";
 import {
   DEFAULT_GARMENT_CONSTRAINT,
@@ -46,12 +42,12 @@ function getGeminiClient(): GoogleGenAI {
 }
 
 export interface CrazySlotsControls {
-  possession: number; // 0..100
-  foreignMatter: number; // 0..100
-  rhythmicObedience: number; // 0..100
-  imageLoyalty: number; // 0..100
-  topologyRupture: number; // 0..100
-  materialRot: number; // 0..100
+  possession: number;
+  foreignMatter: number;
+  rhythmicObedience: number;
+  imageLoyalty: number;
+  topologyRupture: number;
+  materialRot: number;
 }
 
 export interface ProposeRequestPayload {
@@ -68,104 +64,72 @@ export interface ProposeRequestPayload {
   crazySlotsControls?: CrazySlotsControls;
 }
 
-/**
- * Compatibility surface for the Crazy Slots appliance. The returned `plan` is proposal
- * material only and must not be represented as accepted or executable until a
- * Haunted Toaster canonical-admission result exists.
- */
-export async function generateProposals(payload: ProposeRequestPayload): Promise<PlanProposal[]> {
+const DEFAULT_CONTROLS: CrazySlotsControls = {
+  possession: 50,
+  foreignMatter: 20,
+  rhythmicObedience: 80,
+  imageLoyalty: 75,
+  topologyRupture: 30,
+  materialRot: 25,
+};
+
+function proposalFromModel(
+  payload: ProposeRequestPayload,
+  guidance: GarmentConstraint,
+  prop: any,
+): PlanProposal {
+  const proposalPlan = buildProposalPlan(payload, prop.requestedAxes || {});
+  const lockedPlan = payload.lockState && payload.lockedPlan
+    ? applyLocks(proposalPlan, payload.lockedPlan, payload.lockState)
+    : proposalPlan;
+  const guidanceWarnings = inspectAuthoringGuidance(lockedPlan, guidance);
+
+  return {
+    id: prop.id || `prop_slots_${payload.seed}`,
+    proposalType: prop.proposalType || "faithful",
+    title: prop.title || "Crazy Slots Proposal",
+    tagline: prop.tagline || "Creative proposal material awaiting Haunted Toaster admission",
+    plan: lockedPlan,
+    rationale: Array.isArray(prop.rationale) ? prop.rationale : [],
+    mutations: Array.isArray(prop.mutations) ? prop.mutations : [],
+    confidence: typeof prop.confidence === "number" ? prop.confidence : 0.91,
+    foreignElement: prop.foreignElement,
+    ...(guidanceWarnings.length ? { guidanceWarnings } : {}),
+  } as PlanProposal;
+}
+
+/** One product pull yields exactly one proposal object. */
+export async function generateProposal(payload: ProposeRequestPayload): Promise<PlanProposal> {
   const apiKey = process.env.GEMINI_API_KEY;
   const guidance = payload.garmentConstraint || DEFAULT_GARMENT_CONSTRAINT;
 
-  if (!apiKey) return generateFallbackProposals(payload, guidance);
+  if (!apiKey) return generateFallbackProposal(payload, guidance);
 
   try {
-    const ai = getGeminiClient();
-    let audioText = "";
-    if (payload.mode !== "seed_only" && payload.mode !== "lyrics_only" && payload.mode !== "image_only") {
-      audioText = payload.mode === "counterfactual" && payload.counterfactualRemovedModality === "audio"
-        ? "AUDIO MODALITY EXCLUDED (COUNTERFACTUAL EXPERIMENT)"
-        : payload.audioInfo
-          ? `Audio track: ${payload.audioInfo.filename}, Duration: ${payload.audioInfo.durationSeconds}s, Estimated BPM: ${payload.audioInfo.bpmEstimate || 128}.`
-          : "";
-    }
+    const controls = payload.crazySlotsControls || DEFAULT_CONTROLS;
+    const audioText = payload.mode === "counterfactual" && payload.counterfactualRemovedModality === "audio"
+      ? "AUDIO MODALITY EXCLUDED (COUNTERFACTUAL EXPERIMENT)"
+      : payload.audioInfo
+        ? `Audio track: ${payload.audioInfo.filename}, duration ${payload.audioInfo.durationSeconds}s, estimated BPM ${payload.audioInfo.bpmEstimate || 128}.`
+        : "";
+    const lyricsText = payload.mode === "counterfactual" && payload.counterfactualRemovedModality === "lyrics"
+      ? "LYRICS MODALITY EXCLUDED (COUNTERFACTUAL EXPERIMENT)"
+      : payload.lyrics ? `Song lyrics:\n${payload.lyrics}` : "";
+    const imageText = payload.mode === "counterfactual" && payload.counterfactualRemovedModality === "image"
+      ? "IMAGE MODALITY EXCLUDED (COUNTERFACTUAL EXPERIMENT)"
+      : payload.imageInfo ? `Cover image filename: ${payload.imageInfo.filename}` : "";
 
-    let lyricsText = "";
-    if (payload.mode !== "seed_only" && payload.mode !== "audio_only" && payload.mode !== "image_only") {
-      lyricsText = payload.mode === "counterfactual" && payload.counterfactualRemovedModality === "lyrics"
-        ? "LYRICS MODALITY EXCLUDED (COUNTERFACTUAL EXPERIMENT)"
-        : payload.lyrics ? `Song Lyrics:\n${payload.lyrics}` : "";
-    }
-
-    let imageText = "";
-    if (payload.mode !== "seed_only" && payload.mode !== "audio_only" && payload.mode !== "lyrics_only") {
-      imageText = payload.mode === "counterfactual" && payload.counterfactualRemovedModality === "image"
-        ? "IMAGE MODALITY EXCLUDED (COUNTERFACTUAL EXPERIMENT)"
-        : payload.imageInfo ? `Cover Image filename: ${payload.imageInfo.filename}` : "";
-    }
-
-    const controls = payload.crazySlotsControls || {
-      possession: 50,
-      foreignMatter: 20,
-      rhythmicObedience: 80,
-      imageLoyalty: 75,
-      topologyRupture: 30,
-      materialRot: 25,
-    };
-
-    const controlsText = `CRAZY SLOTS HARDWARE CONTROLS:
-- Possession (${controls.possession}%): Overall intensity and spectral override.
-- Foreign Matter (${controls.foreignMatter}%): Unprovoked alien anomaly / foreign body strength.
-- Rhythmic Obedience (${controls.rhythmicObedience}%): Transient synchronization rigidity vs fluid drift.
-- Image Loyalty (${controls.imageLoyalty}%): Palette & texture adherence to cover art.
-- Topology Rupture (${controls.topologyRupture}%): Preference for folded, fractured, or hyper-torus geometries.
-- Material Rot (${controls.materialRot}%): Preference for decayed copper, quantum plasma, or oxidized textures.`;
-
+    const controlsText = `CRAZY SLOTS AUTHORING CONTROLS:\n- Possession: ${controls.possession}%\n- Foreign Matter: ${controls.foreignMatter}%\n- Rhythmic Obedience: ${controls.rhythmicObedience}%\n- Image Loyalty: ${controls.imageLoyalty}%\n- Topology Rupture: ${controls.topologyRupture}%\n- Material Rot: ${controls.materialRot}%`;
     const noveltyText = payload.noveltyTarget
       ? `CREATIVE COVERAGE TARGET: topology=${payload.noveltyTarget.topology}, material=${payload.noveltyTarget.material}, motion=${payload.noveltyTarget.motionGrammar}. ${payload.noveltyTarget.rationale || ""}`
       : "";
-
     const lockedText = payload.lockState && payload.lockedPlan
-      ? `AUTHORING LOCKS: Preserve these user-requested fields when forming proposal material: ${JSON.stringify(payload.lockState)}.`
+      ? `AUTHORING LOCKS: Preserve these user-requested fields: ${JSON.stringify(payload.lockState)}.`
       : "";
 
-    const systemPrompt = `You are Toaster Lab's Crazy Slots creative proposer for Haunted Toaster.
-Produce EXACTLY ONE CREATIVE PROPOSAL for this pull.
+    const systemPrompt = `You are Toaster Lab's Crazy Slots creative proposer for Haunted Toaster.\nProduce EXACTLY ONE CREATIVE PROPOSAL for this pull.\n\nYou are NOT the execution authority. Do not claim validity, canonical status, an address, a resolved timeline, or executability. Your output is authoring intent that Haunted Toaster may later admit.\n\nCurrent Lab vocabulary, for proposal guidance only:\n- topology: ${TOPOLOGIES.join(", ")}\n- material: ${MATERIALS.join(", ")}\n- motionGrammar: ${MOTION_GRAMMARS.join(", ")}\n- cameraGrammar: ${CAMERA_GRAMMARS.join(", ")}\n- lyricBehavior: ${LYRIC_BEHAVIORS.join(", ")}\n- temporalDensity: ${TEMPORAL_DENSITIES.join(", ")}\n\nInclude structured rationale for requested axes. Do not emit rendering code.`;
 
-You are NOT the execution authority. Do not claim validity, canonical status, an address, a resolved timeline, or executability. Your output is authoring intent that will later be adapted and submitted to Haunted Toaster for canonical admission.
-
-Current Lab vocabulary, for proposal guidance only:
-- topology: ${TOPOLOGIES.join(", ")}
-- material: ${MATERIALS.join(", ")}
-- motionGrammar: ${MOTION_GRAMMARS.join(", ")}
-- cameraGrammar: ${CAMERA_GRAMMARS.join(", ")}
-- lyricBehavior: ${LYRIC_BEHAVIORS.join(", ")}
-- temporalDensity: ${TEMPORAL_DENSITIES.join(", ")}
-
-Include structured rationale for requested axes. Do not emit rendering code. Do not describe your proposal as schema-valid merely because it fits this Lab vocabulary.`;
-
-    const userPrompt = `Analysis Mode: ${payload.mode}
-Declared authoring seed: ${payload.seed}
-Authoring guidance profile: ${guidance.name}
-${controlsText}
-${audioText}
-${lyricsText}
-${imageText}
-${noveltyText}
-${lockedText}
-
-Return exactly one proposal object with requestedAxes, rationale, mutations, confidence, and optional foreignElement.`;
-
-    const contentsParts: any[] = [];
-    if (payload.imageInfo?.base64 && (payload.mode === "full" || payload.mode === "image_only")) {
-      contentsParts.push({
-        inlineData: {
-          mimeType: payload.imageInfo.mimeType || "image/png",
-          data: payload.imageInfo.base64.replace(/^data:image\/\w+;base64,/, ""),
-        },
-      });
-    }
-    contentsParts.push({ text: userPrompt });
+    const userPrompt = `Analysis Mode: ${payload.mode}\nDeclared authoring seed: ${payload.seed}\nAuthoring guidance profile: ${guidance.name}\n${controlsText}\n${audioText}\n${lyricsText}\n${imageText}\n${noveltyText}\n${lockedText}\n\nReturn one proposal object with requestedAxes, rationale, mutations, confidence, and optional foreignElement.`;
 
     const requestedAxesSchema = {
       type: Type.OBJECT,
@@ -184,58 +148,61 @@ Return exactly one proposal object with requestedAxes, rationale, mutations, con
     const proposalSchema = {
       type: Type.OBJECT,
       properties: {
-        proposals: {
+        id: { type: Type.STRING },
+        proposalType: { type: Type.STRING },
+        title: { type: Type.STRING },
+        tagline: { type: Type.STRING },
+        confidence: { type: Type.NUMBER },
+        foreignElement: { type: Type.STRING },
+        requestedAxes: requestedAxesSchema,
+        rationale: {
           type: Type.ARRAY,
           items: {
             type: Type.OBJECT,
             properties: {
-              id: { type: Type.STRING },
-              proposalType: { type: Type.STRING },
-              title: { type: Type.STRING },
-              tagline: { type: Type.STRING },
-              confidence: { type: Type.NUMBER },
-              foreignElement: { type: Type.STRING },
-              requestedAxes: requestedAxesSchema,
-              rationale: {
+              field: { type: Type.STRING },
+              evidence: {
                 type: Type.ARRAY,
                 items: {
                   type: Type.OBJECT,
                   properties: {
-                    field: { type: Type.STRING },
-                    evidence: {
-                      type: Type.ARRAY,
-                      items: {
-                        type: Type.OBJECT,
-                        properties: {
-                          source: { type: Type.STRING },
-                          interval: { type: Type.ARRAY, items: { type: Type.NUMBER } },
-                          excerpt: { type: Type.STRING },
-                          observation: { type: Type.STRING },
-                        },
-                      },
-                    },
-                  },
-                },
-              },
-              mutations: {
-                type: Type.ARRAY,
-                items: {
-                  type: Type.OBJECT,
-                  properties: {
-                    field: { type: Type.STRING },
-                    previous: { type: Type.STRING },
-                    proposed: { type: Type.STRING },
-                    reason: { type: Type.STRING },
+                    source: { type: Type.STRING },
+                    interval: { type: Type.ARRAY, items: { type: Type.NUMBER } },
+                    excerpt: { type: Type.STRING },
+                    observation: { type: Type.STRING },
                   },
                 },
               },
             },
           },
         },
+        mutations: {
+          type: Type.ARRAY,
+          items: {
+            type: Type.OBJECT,
+            properties: {
+              field: { type: Type.STRING },
+              previous: { type: Type.STRING },
+              proposed: { type: Type.STRING },
+              reason: { type: Type.STRING },
+            },
+          },
+        },
       },
     };
 
-    const response = await ai.models.generateContent({
+    const contentsParts: any[] = [];
+    if (payload.imageInfo?.base64 && (payload.mode === "full" || payload.mode === "image_only")) {
+      contentsParts.push({
+        inlineData: {
+          mimeType: payload.imageInfo.mimeType || "image/png",
+          data: payload.imageInfo.base64.replace(/^data:image\/\w+;base64,/, ""),
+        },
+      });
+    }
+    contentsParts.push({ text: userPrompt });
+
+    const response = await getGeminiClient().models.generateContent({
       model: "gemini-3.6-flash",
       contents: { parts: contentsParts },
       config: {
@@ -248,60 +215,35 @@ Return exactly one proposal object with requestedAxes, rationale, mutations, con
     });
 
     const rawText = response.text || "";
-    let parsed: any = null;
+    let cleaned = rawText.trim();
+    if (cleaned.startsWith("```")) {
+      cleaned = cleaned.replace(/^```(?:json)?\s*/i, "").replace(/\s*```$/, "").trim();
+    }
+
+    let parsed: any;
     try {
-      let cleaned = rawText.trim();
-      if (cleaned.startsWith("```")) cleaned = cleaned.replace(/^```(?:json)?\s*/i, "").replace(/\s*```$/, "").trim();
-      try {
-        parsed = JSON.parse(cleaned);
-      } catch (e) {
-        const firstBrace = cleaned.indexOf("{");
-        const lastBrace = cleaned.lastIndexOf("}");
-        if (firstBrace === -1 || lastBrace <= firstBrace) throw e;
-        parsed = JSON.parse(cleaned.substring(firstBrace, lastBrace + 1));
-      }
-    } catch (parseErr) {
-      console.warn("Failed to parse Gemini proposal JSON, returning fallbacks:", parseErr);
-      return generateFallbackProposals(payload, guidance);
+      parsed = JSON.parse(cleaned);
+    } catch (error) {
+      const firstBrace = cleaned.indexOf("{");
+      const lastBrace = cleaned.lastIndexOf("}");
+      if (firstBrace === -1 || lastBrace <= firstBrace) throw error;
+      parsed = JSON.parse(cleaned.substring(firstBrace, lastBrace + 1));
     }
 
-    if (parsed?.proposals && Array.isArray(parsed.proposals) && parsed.proposals.length > 0) {
-      return parsed.proposals.map((prop: any, idx: number) => {
-        const proposalPlan = buildProposalPlan(payload, prop.requestedAxes || {});
-        const lockedPlan = payload.lockState && payload.lockedPlan
-          ? applyLocks(proposalPlan, payload.lockedPlan, payload.lockState)
-          : proposalPlan;
-        const guidanceWarnings = inspectAuthoringGuidance(lockedPlan, guidance);
-
-        return {
-          id: prop.id || `prop_slots_${payload.seed}_${idx}`,
-          proposalType: prop.proposalType || "faithful",
-          title: prop.title || "Crazy Slots Proposal",
-          tagline: prop.tagline || "Creative proposal material awaiting Haunted Toaster admission",
-          plan: lockedPlan,
-          rationale: prop.rationale || [],
-          mutations: prop.mutations || [],
-          confidence: typeof prop.confidence === "number" ? prop.confidence : 0.91,
-          foreignElement: prop.foreignElement,
-          ...(guidanceWarnings.length ? { guidanceWarnings } : {}),
-        } as PlanProposal;
-      });
+    if (!parsed || Array.isArray(parsed) || typeof parsed !== "object") {
+      throw new TypeError("Gemini did not return one proposal object.");
     }
 
-    return generateFallbackProposals(payload, guidance);
+    return proposalFromModel(payload, guidance, parsed);
   } catch (err: any) {
-    const isQuota =
-      err?.status === "RESOURCE_EXHAUSTED" ||
-      err?.code === 429 ||
-      (typeof err?.message === "string" &&
-        (err.message.includes("quota") || err.message.includes("429") || err.message.includes("RESOURCE_EXHAUSTED")));
-
-    if (isQuota) {
-      console.warn("[Crazy Slots Engine] Gemini API rate limit or free tier quota reached. Seamlessly utilizing deterministic Crazy Slots proposal engine.");
-    } else {
-      console.warn("[Crazy Slots Engine] Gemini API unavailable; utilizing deterministic Crazy Slots proposal engine:", err?.message || err);
-    }
-    return generateFallbackProposals(payload, guidance);
+    const isQuota = err?.status === "RESOURCE_EXHAUSTED" || err?.code === 429 ||
+      (typeof err?.message === "string" && /quota|429|RESOURCE_EXHAUSTED/i.test(err.message));
+    console.warn(
+      isQuota
+        ? "[Crazy Slots Engine] Gemini quota reached; using deterministic one-proposal fallback."
+        : `[Crazy Slots Engine] Gemini unavailable; using deterministic one-proposal fallback: ${err?.message || err}`,
+    );
+    return generateFallbackProposal(payload, guidance);
   }
 }
 
@@ -350,134 +292,103 @@ function baseProposalPlan(payload: ProposeRequestPayload): GenerationPlan {
   };
 }
 
-/** Seeded local fallback for proposal material only; not canonical execution. */
-export function generateFallbackProposals(
+/** Seeded local fallback for proposal material only; never canonical execution. */
+export function generateFallbackProposal(
   payload: ProposeRequestPayload,
-  guidance: GarmentConstraint
-): PlanProposal[] {
-  const seed = payload.seed;
-  const controls = payload.crazySlotsControls || {
-    possession: 50,
-    foreignMatter: 20,
-    rhythmicObedience: 80,
-    imageLoyalty: 75,
-    topologyRupture: 30,
-    materialRot: 25,
-  };
+  guidance: GarmentConstraint = payload.garmentConstraint || DEFAULT_GARMENT_CONSTRAINT,
+): PlanProposal {
+  const controls = payload.crazySlotsControls || DEFAULT_CONTROLS;
+  const plan = baseProposalPlan(payload);
 
-  const faithfulPlan = baseProposalPlan(payload);
+  if (controls.topologyRupture > 60) plan.topology = "hyper_torus";
+  else if (controls.topologyRupture > 30) plan.topology = "folded_manifold";
 
-  // Apply Crazy Slots controls to the fallback plan
-  if (controls.topologyRupture > 60) {
-    faithfulPlan.topology = "hyper_torus";
-  } else if (controls.topologyRupture > 30) {
-    faithfulPlan.topology = "folded_manifold";
-  }
+  if (controls.materialRot > 60) plan.material = "decayed_copper";
+  else if (controls.materialRot > 30) plan.material = "quantum_plasma";
 
-  if (controls.materialRot > 60) {
-    faithfulPlan.material = "decayed_copper";
-  } else if (controls.materialRot > 30) {
-    faithfulPlan.material = "quantum_plasma";
-  }
+  if (controls.rhythmicObedience < 40) plan.motionGrammar = "chaotic_snap";
 
-  if (controls.rhythmicObedience < 40) {
-    faithfulPlan.motionGrammar = "chaotic_snap";
-  }
+  const preserved = payload.lockState && payload.lockedPlan
+    ? applyLocks(plan, payload.lockedPlan, payload.lockState)
+    : plan;
+  const guidanceWarnings = inspectAuthoringGuidance(preserved, guidance);
 
-  const foreignElement = controls.foreignMatter > 30
-    ? `A hovering void-glass monolith (intensity: ${controls.foreignMatter}%)`
-    : undefined;
-
-  const preserveLocks = (plan: GenerationPlan) =>
-    payload.lockState && payload.lockedPlan ? applyLocks(plan, payload.lockedPlan, payload.lockState) : plan;
-
-  const preserved = preserveLocks(faithfulPlan);
-  inspectAuthoringGuidance(preserved, guidance);
-
-  return [
-    {
-      id: `prop_slots_${seed}`,
-      proposalType: controls.foreignMatter > 50 ? "foreign_body" : "faithful",
-      title: "Crazy Slots Proposal",
-      tagline: `Seed ${seed} • Possession ${controls.possession}% • Foreign Matter ${controls.foreignMatter}% • Awaits Haunted Toaster admission`,
-      plan: preserved,
-      rationale: [
-        {
-          field: "topology",
-          evidence: [
-            {
-              source: payload.mode === "lyrics_only" ? "lyrics" : "audio",
-              interval: [0, 30],
-              observation: `Derived from input evidence with Topology Rupture dial at ${controls.topologyRupture}%.`,
-            },
-          ],
-        },
-      ],
-      mutations: [],
-      confidence: 0.92,
-      foreignElement,
-    },
-  ];
+  return {
+    id: `prop_slots_${payload.seed}`,
+    proposalType: controls.foreignMatter > 50 ? "foreign_body" : "faithful",
+    title: "Crazy Slots Proposal",
+    tagline: `Seed ${payload.seed} • Possession ${controls.possession}% • Foreign Matter ${controls.foreignMatter}% • Awaits Haunted Toaster admission`,
+    plan: preserved,
+    rationale: [{
+      field: "topology",
+      evidence: [{
+        source: payload.mode === "lyrics_only" ? "lyrics" : "audio",
+        interval: [0, 30],
+        observation: `Derived from input evidence with Topology Rupture dial at ${controls.topologyRupture}%.`,
+      }],
+    }],
+    mutations: [],
+    confidence: 0.92,
+    foreignElement: controls.foreignMatter > 30
+      ? `A hovering void-glass monolith (intensity: ${controls.foreignMatter}%)`
+      : undefined,
+    ...(guidanceWarnings.length ? { guidanceWarnings } : {}),
+  } as PlanProposal;
 }
 
+function containsLrcTimestamp(lyrics: string): boolean {
+  return lyrics.split(/\r?\n/).some((line) => /^\s*\[\d{1,2}:\d{2}(?:\.\d{1,3})?\]/.test(line));
+}
+
+export type LyricProcessor = "gemini" | "local";
+export type GeneratedLyricTimingSource = "provided" | "estimated";
+
 /**
- * Parse and clean raw lyrics: strip section headers e.g. [Verse 1], [Chorus], Verse:, (Chorus),
- * remove double quotes or stray characters, and return clean timestamped lyrics [mm:ss.xx].
- * Uses Gemini API when available, falling back gracefully to local deterministic parser.
+ * Clean lyrics while keeping processor provenance separate from timing provenance.
+ * Existing LRC timestamps are preserved as provided evidence. Any timestamps created
+ * from text + duration alone are estimates, regardless of whether Gemini or local code
+ * created them.
  */
 export async function parseAndCleanLyricsWithGemini(
   lyrics: string,
-  durationSeconds: number = 180
-): Promise<{ cleanedLyrics: string; source: "gemini" | "local" }> {
+  durationSeconds: number = 180,
+): Promise<{
+  cleanedLyrics: string;
+  processor: LyricProcessor;
+  timingSource: GeneratedLyricTimingSource;
+}> {
   if (!lyrics || !lyrics.trim()) {
-    return { cleanedLyrics: "", source: "local" };
+    return { cleanedLyrics: "", processor: "local", timingSource: "estimated" };
+  }
+
+  if (containsLrcTimestamp(lyrics)) {
+    const { cleanedText } = cleanAndTagLyricsLocally(lyrics, durationSeconds);
+    return { cleanedLyrics: cleanedText, processor: "local", timingSource: "provided" };
   }
 
   const apiKey = process.env.GEMINI_API_KEY;
   if (!apiKey || apiKey === "dummy_key") {
     const { cleanedText } = cleanAndTagLyricsLocally(lyrics, durationSeconds);
-    return { cleanedLyrics: cleanedText, source: "local" };
+    return { cleanedLyrics: cleanedText, processor: "local", timingSource: "estimated" };
   }
 
   try {
-    const ai = getGeminiClient();
-    const prompt = `You are a professional music lyric preprocessor and LRC timestamping engine.
-Clean the following song lyrics by doing the following strictly:
-1. Strip out section header tags such as [Verse 1], [Chorus], Verse 1:, [Bridge], [Outro], (Chorus), [Intro], [Hook], etc.
-2. Remove stray quotes (e.g. " line of lyric "), quotes around lines, and empty blank quotes ("").
-3. Format each line of lyrics with an LRC timestamp tag at the start in [mm:ss.xx] format (e.g. [00:12.50] Clean lyric line).
-4. Evenly distribute the timing across the track duration of ${durationSeconds} seconds monotonically.
-5. Return ONLY the cleaned lyric lines with timestamps. Do NOT wrap in markdown code blocks or add conversational preamble.
+    const prompt = `You are a lyric text preprocessor.\n1. Strip section headers such as [Verse], [Chorus], Verse:, (Bridge), [Outro].\n2. Remove stray quote wrappers without inventing or rewriting lyric text.\n3. Add monotonic LRC timestamps in [mm:ss.xx] format distributed across ${durationSeconds} seconds.\n4. These timestamps are ESTIMATES based only on text length and track duration; do not claim audio alignment or sung-line detection.\n5. Return only cleaned timestamped lyric lines.`;
 
-RAW LYRICS:
-${lyrics}`;
-
-    const response = await ai.models.generateContent({
+    const response = await getGeminiClient().models.generateContent({
       model: "gemini-3.6-flash",
-      contents: prompt,
+      contents: `${prompt}\n\nRAW LYRICS:\n${lyrics}`,
     });
 
-    const resultText = response.text ? response.text.trim() : "";
-    if (resultText && resultText.length > 5) {
-      // Strip any accidental markdown ``` code fence
-      const cleanResult = resultText.replace(/^```[a-z]*\n?/i, "").replace(/\n?```$/i, "").trim();
-      return { cleanedLyrics: cleanResult, source: "gemini" };
+    const resultText = response.text?.trim() || "";
+    if (resultText.length > 5) {
+      const cleanedLyrics = resultText.replace(/^```[a-z]*\n?/i, "").replace(/\n?```$/i, "").trim();
+      return { cleanedLyrics, processor: "gemini", timingSource: "estimated" };
     }
   } catch (err: any) {
-    const isQuota =
-      err?.status === "RESOURCE_EXHAUSTED" ||
-      err?.code === 429 ||
-      (typeof err?.message === "string" &&
-        (err.message.includes("quota") || err.message.includes("429") || err.message.includes("RESOURCE_EXHAUSTED")));
-
-    if (isQuota) {
-      console.info("[Lyric Processor] Gemini API quota reached. Using local deterministic lyric preprocessor.");
-    } else {
-      console.info("[Lyric Processor] Gemini API unavailable. Using local deterministic lyric preprocessor.");
-    }
+    console.info(`[Lyric Processor] Gemini unavailable; using local deterministic estimates: ${err?.message || err}`);
   }
 
   const { cleanedText } = cleanAndTagLyricsLocally(lyrics, durationSeconds);
-  return { cleanedLyrics: cleanedText, source: "local" };
+  return { cleanedLyrics: cleanedText, processor: "local", timingSource: "estimated" };
 }
-
