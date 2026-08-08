@@ -8,7 +8,7 @@ import express from "express";
 import path from "path";
 import dotenv from "dotenv";
 import { createServer as createViteServer } from "vite";
-import { generateProposals, parseAndCleanLyricsWithGemini } from "./src/server/geminiProposer";
+import { generateProposal, parseAndCleanLyricsWithGemini } from "./src/server/geminiProposer";
 import { hauntedToasterAuthority } from "./src/server/hauntedToasterAuthority";
 import {
   rerollAxis,
@@ -30,26 +30,26 @@ async function startServer() {
     res.json({ status: "ok", app: "Toaster Lab Workbench" });
   });
 
-  // Generate proposal material only. Nothing returned here is executable yet.
+  // One pull -> one proposal object. Nothing returned here is executable yet.
   app.post("/api/toaster/analyze-and-propose", async (req, res) => {
     try {
-      const proposals = await generateProposals(req.body);
-      res.json({ success: true, proposals });
+      const proposal = await generateProposal(req.body);
+      res.json({ success: true, proposal });
     } catch (error: any) {
-      console.error("Error generating proposals:", error);
-      res.status(500).json({ success: false, error: error.message || "Failed to generate proposals" });
+      console.error("Error generating proposal:", error);
+      res.status(500).json({ success: false, error: error.message || "Failed to generate proposal" });
     }
   });
 
-  // Lyric parsing & tag cleanup route
+  // Lyric parsing & tag cleanup route. Processor provenance and timing provenance are distinct.
   app.post("/api/toaster/parse-lyrics", async (req, res) => {
     try {
       const { lyrics, durationSeconds } = req.body;
-      const { cleanedLyrics, source } = await parseAndCleanLyricsWithGemini(
+      const { cleanedLyrics, processor, timingSource } = await parseAndCleanLyricsWithGemini(
         lyrics || "",
         durationSeconds || 180
       );
-      res.json({ success: true, cleanedLyrics, source });
+      res.json({ success: true, cleanedLyrics, processor, timingSource });
     } catch (error: any) {
       console.error("Error parsing lyrics:", error);
       res.status(500).json({ success: false, error: error.message || "Failed to parse lyrics" });
