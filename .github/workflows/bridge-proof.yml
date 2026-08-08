@@ -6,6 +6,7 @@ on:
       - main
       - agent/issue-1-authoring-boundary
       - agent/pr-3-exportable-proposal
+      - agent/harden-canonical-lab-candidate
   pull_request:
     branches:
       - main
@@ -24,3 +25,15 @@ jobs:
       - run: npm run lint
       - run: npm run build
       - run: npm test
+
+      - name: Checkout current Haunted Toaster consumer
+        uses: actions/checkout@v4
+        with:
+          repository: the-static-collective/the-haunted-toaster
+          ref: main
+          path: haunted-toaster-current
+
+      - name: Prove transfer against current Haunted Toaster importer
+        env:
+          HAUNTED_TOASTER_CHECKOUT: ${{ github.workspace }}/haunted-toaster-current
+        run: npm run test:consumer-transfer
