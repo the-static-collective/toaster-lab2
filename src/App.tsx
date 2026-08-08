@@ -1,5 +1,5 @@
 import React, { useState, useEffect } from "react";
-import { Sliders, Sparkles, RefreshCw, Zap, ShieldCheck, Cpu } from "lucide-react";
+import { RefreshCw } from "lucide-react";
 import { SlotBay } from "./components/SlotBay";
 import { CrazySlotsControlsPanel } from "./components/CrazySlotsControls";
 import { CrazySlotsTrigger } from "./components/CrazySlotsTrigger";
@@ -8,7 +8,6 @@ import { ProposalOutputBay } from "./components/ProposalOutputBay";
 import {
   AudioInputData,
   ImageInputData,
-  LockState,
   PlanProposal,
 } from "./types/toaster";
 
@@ -39,7 +38,7 @@ export default function App() {
     handlePullCrazySlots();
   }, []);
 
-  // CRAZY SLOTS Pull Handler
+  // CRAZY SLOTS Pull Handler: one pull -> one proposal object.
   const handlePullCrazySlots = async () => {
     setIsGenerating(true);
     setErrorMsg(null);
@@ -58,8 +57,8 @@ export default function App() {
       });
 
       const data = await response.json();
-      if (data.success && data.proposals && data.proposals.length > 0) {
-        setProposal(data.proposals[0]);
+      if (data.success && data.proposal) {
+        setProposal(data.proposal);
       } else {
         setErrorMsg("Proposal generation produced an invalid payload. Try pulling again.");
       }
